@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VitalPulse — Live Monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg:      #0a0e14;
+    --surface: #111722;
+    --border:  #1e2a3a;
+    --muted:   #3a4a5e;
+    --text:    #c8d8e8;
+    --dim:     #5a7090;
+    --green:   #00e5a0;
+    --amber:   #f5a623;
+    --red:     #ff4757;
+    --blue:    #4ab3f4;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Menlo', monospace;
+    min-height: 100vh;
+    padding: 24px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 32px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo { display: flex; align-items: center; gap: 10px; }
+
+  .ecg-line { width: 32px; height: 18px; overflow: visible; }
+  .ecg-path {
+    stroke: var(--green); stroke-width: 2; fill: none;
+    stroke-dasharray: 80; stroke-dashoffset: 80;
+    animation: ecg-draw 2s linear infinite;
+  }
+  @keyframes ecg-draw {
+    0%   { stroke-dashoffset: 80; opacity: 1; }
+    80%  { stroke-dashoffset: 0;  opacity: 1; }
+    100% { stroke-dashoffset: 0;  opacity: 0; }
+  }
+
+  .logo-name { font-size: 18px; font-weight: 700; letter-spacing: 0.05em; color: #fff; }
+  .logo-name span { color: var(--green); }
+
+  .header-right { display: flex; align-items: center; gap: 20px; }
+
+  .status-pill {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--dim); padding: 4px 10px;
+    border: 1px solid var(--border); border-radius: 20px;
+  }
+
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); transition: background 0.3s;
+  }
+  .status-dot.live  { background: var(--green); animation: blink 1.5s infinite; }
+  .status-dot.error { background: var(--red); }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .clock { font-size: 12px; color: var(--dim); letter-spacing: 0.05em; }
+
+  #conn-banner {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px 20px; margin-bottom: 24px;
+    display: flex; align-items: center; gap: 12px; font-size: 13px;
+  }
+  #conn-banner input {
+    background: var(--bg); border: 1px solid var(--muted);
+    border-radius: 6px; color: var(--text); font-family: inherit;
+    font-size: 13px; padding: 6px 10px; width: 240px; outline: none;
+  }
+  #conn-banner input:focus { border-color: var(--green); }
+  #conn-banner button {
+    background: var(--green); border: none; border-radius: 6px;
+    color: #000; cursor: pointer; font-family: inherit; font-size: 12px;
+    font-weight: 700; letter-spacing: 0.08em; padding: 7px 16px;
+    text-transform: uppercase;
+  }
+  #conn-banner button:hover { opacity: 0.85; }
+  #conn-note { color: var(--dim); font-size: 12px; }
+
+  .devices-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px; margin-bottom: 24px;
+  }
+
+  .device-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px; transition: border-color 0.3s;
+  }
+  .device-card.active { border-color: var(--muted); }
+
+  .device-header {
+    display: flex; justify-content: space-between;
+    align-items: flex-start; margin-bottom: 16px;
+  }
+  .device-name { font-size: 14px; font-weight: 700; color: #fff; letter-spacing: 0.02em; }
+  .device-id   { font-size: 11px; color: var(--dim); margin-top: 2px; }
+
+  .activity-badge {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em;
+    padding: 3px 8px; border-radius: 4px;
+    background: var(--border); color: var(--dim); transition: all 0.3s;
+  }
+  .activity-badge.running  { background: rgba(245,166,35,0.15); color: var(--amber); }
+  .activity-badge.walking  { background: rgba(74,179,244,0.15);  color: var(--blue); }
+  .activity-badge.cycling  { background: rgba(74,179,244,0.15);  color: var(--blue); }
+  .activity-badge.resting  { background: rgba(0,229,160,0.1);    color: var(--green); }
+  .activity-badge.sleeping { background: rgba(90,112,144,0.2);   color: var(--dim); }
+
+  .metrics { display: flex; flex-direction: column; gap: 10px; }
+
+  .metric-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px; background: var(--bg);
+    border-radius: 6px; border: 1px solid var(--border); transition: border-color 0.2s;
+  }
+  .metric-row.flash { border-color: var(--green); }
+
+  .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--dim); }
+  .metric-value { display: flex; align-items: baseline; gap: 4px; }
+
+  .metric-num {
+    font-size: 24px; font-weight: 700; color: var(--green);
+    font-variant-numeric: tabular-nums; transition: color 0.3s;
+    min-width: 64px; text-align: right;
+  }
+  .metric-num.warn  { color: var(--amber); }
+  .metric-num.alert { color: var(--red); }
+  .metric-unit { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.08em; }
+
+  .last-seen { font-size: 10px; color: var(--muted); margin-top: 12px; text-align: right; letter-spacing: 0.04em; }
+
+  .bottom-row { display: grid; grid-template-columns: 1fr 1.6fr; gap: 16px; }
+
+  .db-counters { display: flex; flex-direction: column; gap: 10px; }
+
+  .db-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 18px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .db-left { display: flex; align-items: center; gap: 10px; }
+  .db-dot  { width: 8px; height: 8px; border-radius: 50%; }
+  .db-name { font-size: 13px; font-weight: 600; color: #fff; }
+  .db-desc { font-size: 10px; color: var(--dim); margin-top: 1px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .db-count { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--text); min-width: 48px; text-align: right; }
+
+  .log-panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .log-header {
+    padding: 12px 16px; border-bottom: 1px solid var(--border);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--dim); display: flex; justify-content: space-between; align-items: center;
+  }
+  .log-entries {
+    flex: 1; overflow-y: auto; padding: 8px 0; max-height: 220px;
+    scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  }
+  .log-entry {
+    display: grid; grid-template-columns: 80px 90px 1fr 60px;
+    gap: 8px; padding: 5px 16px; font-size: 11px; line-height: 1.5;
+    border-bottom: 1px solid rgba(30,42,58,0.5); transition: background 0.15s;
+  }
+  .log-entry:hover { background: rgba(255,255,255,0.02); }
+  .log-ts    { color: var(--dim); }
+  .log-topic { color: var(--blue); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-msg   { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .log-db    { text-align: right; font-weight: 600; letter-spacing: 0.05em; }
+  .tag-mysql { color: #4ab3f4; }
+  .tag-mongo { color: #00e5a0; }
+  .tag-neo4j { color: #a78bfa; }
+
+  #alert-bar {
+    background: rgba(255,71,87,0.1); border: 1px solid rgba(255,71,87,0.3);
+    border-radius: 8px; padding: 10px 16px; margin-bottom: 16px;
+    font-size: 12px; color: var(--red); display: none; letter-spacing: 0.04em;
+  }
+  #alert-bar.show { display: block; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <svg class="ecg-line" viewBox="0 0 32 18">
+      <polyline class="ecg-path" points="0,9 6,9 9,3 11,15 13,7 15,9 32,9"/>
+    </svg>
+    <div class="logo-name">Vital<span>Pulse</span></div>
+  </div>
+  <div class="header-right">
+    <div class="status-pill">
+      <div class="status-dot" id="status-dot"></div>
+      <span id="status-text">disconnected</span>
+    </div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
+</header>
+
+<div id="conn-banner">
+  <span style="color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.08em">Broker</span>
+  <input id="broker-input" type="text" value="ws://localhost:9001"/>
+  <button onclick="connectMQTT()">Connect</button>
+  </div>
+
+<div id="alert-bar">&#9888; <span id="alert-msg"></span></div>
+
+<div class="devices-grid" id="devices-grid"></div>
+
+<div class="bottom-row">
+  <div class="db-counters">
+    <div class="db-card">
+      <div class="db-left">
+        <div class="db-dot" style="background:#4ab3f4"></div>
+        <div><div class="db-name">MySQL</div><div class="db-desc">Vitals &middot; alerts</div></div>
+      </div>
+      <div class="db-count" id="cnt-mysql">0</div>
+    </div>
+    <div class="db-card">
+      <div class="db-left">
+        <div class="db-dot" style="background:#00e5a0"></div>
+        <div><div class="db-name">MongoDB</div><div class="db-desc">Telemetry &middot; sessions</div></div>
+      </div>
+      <div class="db-count" id="cnt-mongo">0</div>
+    </div>
+    <div class="db-card">
+      <div class="db-left">
+        <div class="db-dot" style="background:#a78bfa"></div>
+        <div><div class="db-name">Neo4j</div><div class="db-desc">Device graph</div></div>
+      </div>
+      <div class="db-count" id="cnt-neo4j">0</div>
+    </div>
+  </div>
+  <div class="log-panel">
+    <div class="log-header">
+      <span>Live message log</span>
+      <span id="msg-total" style="color:var(--text)">0 messages</span>
+    </div>
+    <div class="log-entries" id="log-entries"></div>
+  </div>
+</div>
+
+<script>
+const DEVICES_META = {
+  'device-001': { name: 'Alice Romano'  },
+  'device-002': { name: 'Marco Bianchi' },
+  'device-003': { name: 'Sara Esposito' },
+};
+const state = { devices: {}, counts: { mysql:0, mongo:0, neo4j:0 }, total: 0 };
+Object.keys(DEVICES_META).forEach(did => {
+  state.devices[did] = { heart_rate:'--', spo2:'--', steps:'--', activity:'--', lastSeen:null };
+});
+
+function renderDevices() {
+  const grid = document.getElementById('devices-grid');
+  grid.innerHTML = '';
+  Object.entries(DEVICES_META).forEach(([did, meta]) => {
+    const d = state.devices[did];
+    const card = document.createElement('div');
+    card.className = 'device-card' + (d.lastSeen ? ' active' : '');
+    card.id = `card-${did}`;
+    card.innerHTML = `
+      <div class="device-header">
+        <div>
+          <div class="device-name">${meta.name}</div>
+          <div class="device-id">${did}</div>
+        </div>
+        <div class="activity-badge ${d.activity}" id="act-${did}">${d.activity}</div>
+      </div>
+      <div class="metrics">
+        <div class="metric-row" id="row-${did}-heart_rate">
+          <span class="metric-label">Heart rate</span>
+          <div class="metric-value">
+            <span class="metric-num ${hrClass(d.heart_rate)}" id="val-${did}-heart_rate">${d.heart_rate}</span>
+            <span class="metric-unit">bpm</span>
+          </div>
+        </div>
+        <div class="metric-row" id="row-${did}-spo2">
+          <span class="metric-label">SpO&#8322;</span>
+          <div class="metric-value">
+            <span class="metric-num ${spo2Class(d.spo2)}" id="val-${did}-spo2">${d.spo2}</span>
+            <span class="metric-unit">%</span>
+          </div>
+        </div>
+        <div class="metric-row" id="row-${did}-steps">
+          <span class="metric-label">Steps</span>
+          <div class="metric-value">
+            <span class="metric-num" id="val-${did}-steps">${d.steps}</span>
+            <span class="metric-unit">steps</span>
+          </div>
+        </div>
+      </div>
+      <div class="last-seen">Last update: <span id="last-${did}">${d.lastSeen ? new Date(d.lastSeen).toLocaleTimeString() : 'waiting...'}</span></div>`;
+    grid.appendChild(card);
+  });
+}
+
+function hrClass(v) {
+  if (v==='--') return '';
+  const n = parseFloat(v);
+  if (n<45||n>120) return 'alert';
+  if (n<55||n>100) return 'warn';
+  return '';
+}
+function spo2Class(v) {
+  if (v==='--') return '';
+  const n = parseFloat(v);
+  if (n<90) return 'alert';
+  if (n<94) return 'warn';
+  return '';
+}
+
+function updateMetric(did, metric, value, activity) {
+  const el  = document.getElementById(`val-${did}-${metric}`);
+  const row = document.getElementById(`row-${did}-${metric}`);
+  if (!el) return;
+  el.textContent = typeof value==='number' ? value.toFixed(metric==='steps'?0:1) : value;
+  el.className = 'metric-num';
+  if (metric==='heart_rate') el.classList.add(hrClass(value));
+  if (metric==='spo2')       el.classList.add(spo2Class(value));
+  if (row) { row.classList.add('flash'); setTimeout(()=>row.classList.remove('flash'),400); }
+  if (activity) {
+    const b = document.getElementById(`act-${did}`);
+    if (b) { b.className=`activity-badge ${activity}`; b.textContent=activity; }
+  }
+  const ls = document.getElementById(`last-${did}`);
+  if (ls) ls.textContent = new Date().toLocaleTimeString();
+}
+
+function addLog(topic, msg, db) {
+  const container = document.getElementById('log-entries');
+  const row = document.createElement('div');
+  row.className = 'log-entry';
+  const cls = db==='MySQL'?'tag-mysql':db==='MongoDB'?'tag-mongo':'tag-neo4j';
+  row.innerHTML = `
+    <span class="log-ts">${new Date().toLocaleTimeString()}</span>
+    <span class="log-topic">${topic.split('/').slice(-1)[0]}</span>
+    <span class="log-msg">${msg}</span>
+    <span class="log-db ${cls}">${db}</span>`;
+  container.insertBefore(row, container.firstChild);
+  if (container.children.length > 60) container.lastChild.remove();
+  state.total++;
+  document.getElementById('msg-total').textContent = `${state.total} messages`;
+}
+
+let alertTimer = null;
+function showAlert(msg) {
+  const bar = document.getElementById('alert-bar');
+  document.getElementById('alert-msg').textContent = msg;
+  bar.classList.add('show');
+  if (alertTimer) clearTimeout(alertTimer);
+  alertTimer = setTimeout(()=>bar.classList.remove('show'), 6000);
+}
+
+let mqttClient = null;
+function connectMQTT() {
+  const url = document.getElementById('broker-input').value.trim();
+  if (mqttClient) mqttClient.end(true);
+  setStatus('','connecting...');
+  mqttClient = mqtt.connect(url, {
+    clientId: 'vitalpulse-dashboard-' + Math.random().toString(16).slice(2,6),
+    reconnectPeriod: 3000,
+  });
+  mqttClient.on('connect', () => { setStatus('live','live'); mqttClient.subscribe('vitalpulse/#',{qos:1}); });
+  mqttClient.on('error',   () => setStatus('error','error'));
+  mqttClient.on('offline', () => setStatus('','offline'));
+  mqttClient.on('message', (topic, payload) => {
+    try { handleMessage(topic, JSON.parse(payload.toString())); } catch(_) {}
+  });
+}
+
+function setStatus(cls, text) {
+  document.getElementById('status-dot').className = 'status-dot' + (cls?' '+cls:'');
+  document.getElementById('status-text').textContent = text;
+}
+
+function handleMessage(topic, data) {
+  if (topic === 'vitalpulse/network') {
+    state.counts.neo4j++;
+    document.getElementById('cnt-neo4j').textContent = state.counts.neo4j;
+    addLog(topic, `${data.user_a} <-> ${data.user_b} (${data.distance_m}m)`, 'Neo4j');
+    return;
+  }
+  const parts = topic.split('/');
+  if (parts.length < 3) return;
+  const did = parts[1], metric = parts[2];
+  if (['heart_rate','spo2','steps'].includes(metric)) {
+    state.counts.mysql++;
+    document.getElementById('cnt-mysql').textContent = state.counts.mysql;
+    if (!state.devices[did]) state.devices[did] = {};
+    state.devices[did][metric] = data.value;
+    state.devices[did].lastSeen = new Date().toISOString();
+    updateMetric(did, metric, data.value);
+    addLog(topic, `${metric.replace('_',' ')} = ${data.value} ${data.unit}`, 'MySQL');
+    if (metric==='heart_rate' && (data.value<45||data.value>120))
+      showAlert(`${(DEVICES_META[did]||{name:did}).name}: heart rate ${data.value} bpm — alert triggered in MySQL`);
+    if (metric==='spo2' && data.value<90)
+      showAlert(`${(DEVICES_META[did]||{name:did}).name}: SpO2 ${data.value}% — alert triggered in MySQL`);
+  } else if (metric==='telemetry') {
+    state.counts.mongo++;
+    document.getElementById('cnt-mongo').textContent = state.counts.mongo;
+    if (data.activity && state.devices[did]) {
+      const b = document.getElementById(`act-${did}`);
+      if (b) { b.className=`activity-badge ${data.activity}`; b.textContent=data.activity; }
+    }
+    addLog(topic, `battery ${data.battery}% · ${data.activity}`, 'MongoDB');
+  } else if (metric==='activity') {
+    state.counts.mongo++;
+    document.getElementById('cnt-mongo').textContent = state.counts.mongo;
+    addLog(topic, `session: ${data.session_type} ${data.duration_sec}s`, 'MongoDB');
+  }
+}
+
+setInterval(() => { document.getElementById('clock').textContent = new Date().toLocaleTimeString('en-GB',{hour12:false}); }, 1000);
+renderDevices();
+</script>
+</body>
+</html>
